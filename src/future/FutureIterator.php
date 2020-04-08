@@ -28,17 +28,22 @@
  * @task  iterator  Iterator Interface
  * @task  internal  Internals
  */
-final class FutureIterator extends Phobject implements Iterator {
+final class FutureIterator
+  extends Phobject
+  implements Iterator {
 
-  protected $wait     = array();
-  protected $work     = array();
-  protected $futures  = array();
-  protected $key;
+  private $hold = array();
+  private $wait = array();
+  private $work = array();
 
-  protected $limit;
+  private $futures = array();
+  private $key;
 
-  protected $timeout;
-  protected $isTimeout = false;
+  private $limit;
+
+  private $timeout;
+  private $isTimeout = false;
+  private $hasRewound = false;
 
 
 /* -(  Basics  )------------------------------------------------------------- */
@@ -52,7 +57,11 @@ final class FutureIterator extends Phobject implements Iterator {
    */
   public function __construct(array $futures) {
     assert_instances_of($futures, 'Future');
-    $this->futures = $futures;
+
+    foreach ($futures as $map_key => $future) {
+      $future->setFutureKey($map_key);
+      $this->addFuture($future);
+    }
   }
 
 
@@ -63,8 +72,16 @@ final class FutureIterator extends Phobject implements Iterator {
    * @task basics
    */
   public function resolveAll() {
-    foreach ($this as $future) {
-      $future->resolve();
+    // If a caller breaks out of a "foreach" and then calls "resolveAll()",
+    // interpret it to mean that we should iterate over whatever futures
+    // remain.
+
+    if ($this->hasRewound) {
+      while ($this->valid()) {
+        $this->next();
+      }
+    } else {
+      iterator_to_array($this);
     }
   }
 
@@ -76,24 +93,20 @@ final class FutureIterator extends Phobject implements Iterator {
    * @param Future  @{class:Future} to add to iterator
    * @task basics
    */
-  public function addFuture(Future $future, $key = null) {
-    if ($key === null) {
-      $this->futures[] = $future;
-      $this->wait[] = last_key($this->futures);
-    } else if (!isset($this->futures[$key])) {
-      $this->futures[$key] = $future;
-      $this->wait[] = $key;
-    } else {
-      throw new Exception(pht('Invalid key %s', $key));
+  public function addFuture(Future $future) {
+    $key = $future->getFutureKey();
+
+    if (isset($this->futures[$key])) {
+      throw new Exception(
+        pht(
+          'This future graph already has a future with key "%s". Each '.
+          'future must have a unique key.',
+          $key));
     }
 
-    // Start running the future if we don't have $this->limit futures running
-    // already. updateWorkingSet() won't start running the future if there's no
-    // limit, so we'll manually poke it here in that case.
-    $this->updateWorkingSet();
-    if (!$this->limit) {
-      $future->isReady();
-    }
+    $this->futures[$key] = $future;
+    $this->hold[$key] = $key;
+
     return $this;
   }
 
@@ -152,6 +165,15 @@ final class FutureIterator extends Phobject implements Iterator {
   }
 
 
+  public function setMaximumWorkingSetSize($limit) {
+    $this->limit = $limit;
+    return $this;
+  }
+
+  public function getMaximumWorkingSetSize() {
+    return $this->limit;
+  }
+
 /* -(  Iterator Interface  )------------------------------------------------- */
 
 
@@ -159,9 +181,12 @@ final class FutureIterator extends Phobject implements Iterator {
    * @task iterator
    */
   public function rewind() {
-    $this->wait = array_keys($this->futures);
-    $this->work = null;
-    $this->updateWorkingSet();
+    if ($this->hasRewound) {
+      throw new Exception(
+        pht('Future graphs can not be rewound.'));
+    }
+    $this->hasRewound = true;
+
     $this->next();
   }
 
@@ -170,92 +195,93 @@ final class FutureIterator extends Phobject implements Iterator {
    */
   public function next() {
     $this->key = null;
-    if (!count($this->wait)) {
+
+    $this->updateWorkingSet();
+
+    if (!$this->work) {
       return;
     }
-
-    $read_sockets = array();
-    $write_sockets = array();
 
     $start = microtime(true);
     $timeout = $this->timeout;
     $this->isTimeout = false;
 
-    $check = $this->getWorkingSet();
-    $resolve = null;
-    do {
-      $read_sockets    = array();
-      $write_sockets   = array();
-      $can_use_sockets = true;
-      $wait_time       = 1;
-      foreach ($check as $wait => $key) {
-        $future = $this->futures[$key];
-        try {
-          if ($future->getException()) {
-            $resolve = $wait;
-            continue;
-          }
-          if ($future->isReady()) {
-            if ($resolve === null) {
-              $resolve = $wait;
-            }
-            continue;
-          }
+    $working_set = array_select_keys($this->futures, $this->work);
 
-          $got_sockets = false;
-          $socks = $future->getReadSockets();
-          if ($socks) {
-            $got_sockets = true;
-            foreach ($socks as $socket) {
-              $read_sockets[] = $socket;
-            }
-          }
+    while (true) {
+      // Update every future first. This is a no-op on futures which have
+      // already resolved or failed, but we want to give futures an
+      // opportunity to make progress even if we can resolve something.
 
-          $socks = $future->getWriteSockets();
-          if ($socks) {
-            $got_sockets = true;
-            foreach ($socks as $socket) {
-              $write_sockets[] = $socket;
-            }
-          }
+      foreach ($working_set as $future_key => $future) {
+        $future->updateFuture();
+      }
 
-          // If any currently active future had neither read nor write sockets,
-          // we can't wait for the current batch of items using sockets.
-          if (!$got_sockets) {
-            $can_use_sockets = false;
-          } else {
-            $wait_time = min($wait_time, $future->getDefaultWait());
-          }
-        } catch (Exception $ex) {
-          $this->futures[$key]->setException($ex);
-          $resolve = $wait;
+      // Check if any future has resolved or failed. If we have any such
+      // futures, we'll return the first one from the iterator.
+
+      $resolve_key = null;
+      foreach ($working_set as $future_key => $future) {
+        if ($future->hasException()) {
+          $resolve_key = $future_key;
+          break;
+        }
+
+        if ($future->hasResult()) {
+          $resolve_key = $future_key;
           break;
         }
       }
-      if ($resolve === null) {
 
-        // Check for a setUpdateInterval() timeout.
-        if ($timeout !== null) {
-          $elapsed = microtime(true) - $start;
-          if ($elapsed > $timeout) {
-            $this->isTimeout = true;
-            return;
-          } else {
-            $wait_time = $timeout - $elapsed;
-          }
+      // We've found a future to resolve, so we're done here for now.
+
+      if ($resolve_key !== null) {
+        $this->moveFutureToDone($resolve_key);
+        return;
+      }
+
+      // We don't have any futures to resolve yet. Check if we're reached
+      // an update interval.
+
+      $wait_time = 1;
+      if ($timeout !== null) {
+        $elapsed = microtime(true) - $start;
+
+        if ($elapsed > $timeout) {
+          $this->isTimeout = true;
+          return;
         }
 
-        if ($can_use_sockets) {
-          Future::waitForSockets($read_sockets, $write_sockets, $wait_time);
-        } else {
-          usleep(1000);
+        $wait_time = min($wait_time, $timeout - $elapsed);
+      }
+
+      // We're going to wait. If possible, we'd like to wait with sockets.
+      // If we can't, we'll just sleep.
+
+      $read_sockets = array();
+      $write_sockets = array();
+      foreach ($working_set as $future_key => $future) {
+        $sockets = $future->getReadSockets();
+        foreach ($sockets as $socket) {
+          $read_sockets[] = $socket;
+        }
+
+        $sockets = $future->getWriteSockets();
+        foreach ($sockets as $socket) {
+          $write_sockets[] = $socket;
         }
       }
-    } while ($resolve === null);
 
-    $this->key = $this->wait[$resolve];
-    unset($this->wait[$resolve]);
-    $this->updateWorkingSet();
+      $use_sockets = ($read_sockets || $write_sockets);
+      if ($use_sockets) {
+        foreach ($working_set as $future) {
+          $wait_time = min($wait_time, $future->getDefaultWait());
+        }
+        $this->waitForSockets($read_sockets, $write_sockets, $wait_time);
+      } else {
+        usleep(1000);
+      }
+    }
   }
 
   /**
@@ -291,37 +317,148 @@ final class FutureIterator extends Phobject implements Iterator {
 
 /* -(  Internals  )---------------------------------------------------------- */
 
-
-  /**
-   * @task internal
-   */
-  protected function getWorkingSet() {
-    if ($this->work === null) {
-      return $this->wait;
-    }
-
-    return $this->work;
-  }
-
   /**
    * @task internal
    */
   protected function updateWorkingSet() {
-    if (!$this->limit) {
-      return;
-    }
+    $limit = $this->getMaximumWorkingSetSize();
+    $work_count = count($this->work);
 
-    $old = $this->work;
-    $this->work = array_slice($this->wait, 0, $this->limit, true);
+    // If we're already working on the maximum number of futures, we just have
+    // to wait for something to resolve. There's no benefit to updating the
+    // queue since we can never make any meaningful progress.
 
-    //  If we're using a limit, our futures are sleeping and need to be polled
-    //  to begin execution, so poll any futures which weren't in our working set
-    //  before.
-    foreach ($this->work as $work => $key) {
-      if (!isset($old[$work])) {
-        $this->futures[$key]->isReady();
+    if ($limit) {
+      if ($work_count >= $limit) {
+        return;
       }
     }
+
+    // If any futures that are currently held are no longer blocked by
+    // dependencies, move them from "hold" to "wait".
+
+    foreach ($this->hold as $future_key) {
+      if (!$this->canMoveFutureToWait($future_key)) {
+        continue;
+      }
+
+      $this->moveFutureToWait($future_key);
+    }
+
+    $wait_count = count($this->wait);
+    $hold_count = count($this->hold);
+
+    if (!$work_count && !$wait_count && $hold_count) {
+      throw new Exception(
+        pht(
+          'Future graph is stalled: some futures are held, but no futures '.
+          'are waiting or working. The graph can never resolve.'));
+    }
+
+    // Figure out how many futures we can start. If we don't have a limit,
+    // we can start every waiting future. If we do have a limit, we can only
+    // start as many futures as we have slots for.
+
+    if ($limit) {
+      $work_limit = min($limit, $wait_count);
+    } else {
+      $work_limit = $wait_count;
+    }
+
+    // If we're ready to start futures, start them now.
+
+    if ($work_limit) {
+      foreach ($this->wait as $future_key) {
+        $this->moveFutureToWork($future_key);
+
+        $work_limit--;
+        if (!$work_limit) {
+          return;
+        }
+      }
+    }
+
   }
+
+  private function canMoveFutureToWait($future_key) {
+    return true;
+  }
+
+  private function moveFutureToWait($future_key) {
+    unset($this->hold[$future_key]);
+    $this->wait[$future_key] = $future_key;
+  }
+
+  private function moveFutureToWork($future_key) {
+    unset($this->wait[$future_key]);
+    $this->work[$future_key] = $future_key;
+
+    $this->futures[$future_key]->startFuture();
+  }
+
+  private function moveFutureToDone($future_key) {
+    $this->key = $future_key;
+    unset($this->work[$future_key]);
+
+    // Before we return, do another working set update so we start any
+    // futures that are ready to go as soon as we can.
+
+    $this->updateWorkingSet();
+
+    $this->futures[$future_key]->endFuture();
+  }
+
+  /**
+   * Wait for activity on one of several sockets.
+   *
+   * @param  list  List of sockets expected to become readable.
+   * @param  list  List of sockets expected to become writable.
+   * @param  float Timeout, in seconds.
+   * @return void
+   */
+  private function waitForSockets(
+    array $read_list,
+    array $write_list,
+    $timeout = 1.0) {
+
+    static $handler_installed = false;
+
+    if (!$handler_installed) {
+      // If we're spawning child processes, we need to install a signal handler
+      // here to catch cases like execing '(sleep 60 &) &' where the child
+      // exits but a socket is kept open. But we don't actually need to do
+      // anything because the SIGCHLD will interrupt the stream_select(), as
+      // long as we have a handler registered.
+      if (function_exists('pcntl_signal')) {
+        if (!pcntl_signal(SIGCHLD, array(__CLASS__, 'handleSIGCHLD'))) {
+          throw new Exception(pht('Failed to install signal handler!'));
+        }
+      }
+      $handler_installed = true;
+    }
+
+    $timeout_sec = (int)$timeout;
+    $timeout_usec = (int)(1000000 * ($timeout - $timeout_sec));
+
+    $exceptfds = array();
+    $ok = @stream_select(
+      $read_list,
+      $write_list,
+      $exceptfds,
+      $timeout_sec,
+      $timeout_usec);
+
+    if ($ok === false) {
+      // Hopefully, means we received a SIGCHLD. In the worst case, we degrade
+      // to a busy wait.
+    }
+  }
+
+  public static function handleSIGCHLD($signo) {
+    // This function is a dummy, we just need to have some handler registered
+    // so that PHP will get interrupted during "stream_select()". If we don't
+    // register a handler, "stream_select()" won't fail.
+  }
+
 
 }

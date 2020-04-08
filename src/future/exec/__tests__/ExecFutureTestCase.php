@@ -59,20 +59,25 @@ final class ExecFutureTestCase extends PhutilTestCase {
 
   public function testResolveTimeoutTestShouldRunLessThan1Sec() {
     // NOTE: This tests interactions between the resolve() timeout and the
-    // ExecFuture timeout, which are similar but not identical.
+    // resolution timeout, which are somewhat similar but not identical.
 
-    $future = $this->newSleep(32000)->start();
+    $future = $this->newSleep(32000);
     $future->setTimeout(32000);
 
     // We expect this to return in 0.01s.
-    $result = $future->resolve(0.01);
+    $iterator = (new FutureIterator(array($future)))
+      ->setUpdateInterval(0.01);
+    foreach ($iterator as $resolved_result) {
+      $result = $resolved_result;
+      break;
+    }
     $this->assertEqual($result, null);
 
     // We expect this to now force the time out / kill immediately. If we don't
     // do this, we'll hang when exiting until our subprocess exits (32000
     // seconds!)
     $future->setTimeout(0.01);
-    $future->resolve();
+    $iterator->resolveAll();
   }
 
   public function testTerminateWithoutStart() {
@@ -120,6 +125,53 @@ final class ExecFutureTestCase extends PhutilTestCase {
     list($err) = $future->resolveKill();
 
     $this->assertEqual(0, $err);
+  }
+
+  public function testEscaping() {
+    $inputs = array(
+      'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789',
+      '!@#$%^&*()-=_+`~,.<>/?[]{};\':"|',
+      '',
+      ' ',
+      'x y',
+      '%PATH%',
+      '"',
+      '""',
+      'a "b" c',
+      '\\',
+      '\\a',
+      'a\\',
+      '\\a\\',
+      'a\\a',
+      '\\\\',
+      '\\"',
+    );
+
+    $bin = $this->getSupportExecutable('echo');
+
+    foreach ($inputs as $input) {
+      if (!is_array($input)) {
+        $input = array($input);
+      }
+
+      list($stdout) = execx(
+        'php -f %R -- %Ls',
+        $bin,
+        $input);
+
+      $stdout = explode("\n", $stdout);
+      $output = array();
+      foreach ($stdout as $line) {
+        $output[] = stripcslashes($line);
+      }
+
+      $this->assertEqual(
+        $input,
+        $output,
+        pht(
+          'Arguments are preserved for input: %s',
+          implode(' ', $input)));
+    }
   }
 
   public function testReadBuffering() {

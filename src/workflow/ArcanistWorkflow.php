@@ -126,6 +126,20 @@ abstract class ArcanistWorkflow extends Phobject {
       ->setArguments($specs);
 
     $information = $this->getWorkflowInformation();
+
+    if ($information !== null) {
+      if (!($information instanceof ArcanistWorkflowInformation)) {
+        throw new Exception(
+          pht(
+            'Expected workflow ("%s", of class "%s") to return an '.
+            '"ArcanistWorkflowInformation" object from call to '.
+            '"getWorkflowInformation()", got %s.',
+            $this->getWorkflowName(),
+            get_class($this),
+            phutil_describe_type($information)));
+      }
+    }
+
     if ($information) {
       $synopsis = $information->getSynopsis();
       if (strlen($synopsis)) {
@@ -1717,9 +1731,9 @@ abstract class ArcanistWorkflow extends Phobject {
     return $parser;
   }
 
-  final protected function resolveCall(ConduitFuture $method, $timeout = null) {
+  final protected function resolveCall(ConduitFuture $method) {
     try {
-      return $method->resolve($timeout);
+      return $method->resolve();
     } catch (ConduitClientException $ex) {
       if ($ex->getErrorCode() == 'ERR-CONDUIT-CALL') {
         echo phutil_console_wrap(
@@ -2069,13 +2083,19 @@ abstract class ArcanistWorkflow extends Phobject {
 
   protected function openURIsInBrowser(array $uris) {
     $browser = $this->getBrowserCommand();
+
+    // The "browser" may actually be a list of arguments.
+    if (!is_array($browser)) {
+      $browser = array($browser);
+    }
+
     foreach ($uris as $uri) {
-      $err = phutil_passthru('%s %s', $browser, $uri);
+      $err = phutil_passthru('%LR %R', $browser, $uri);
       if ($err) {
         throw new ArcanistUsageException(
           pht(
-            "Failed to open '%s' in browser ('%s'). ".
-            "Check your 'browser' config option.",
+            'Failed to open URI "%s" in browser ("%s"). '.
+            'Check your "browser" config option.',
             $uri,
             $browser));
       }
@@ -2089,19 +2109,29 @@ abstract class ArcanistWorkflow extends Phobject {
     }
 
     if (phutil_is_windows()) {
-      return 'start';
+      // See T13504. We now use "bypass_shell", so "start" alone is no longer
+      // a valid binary to invoke directly.
+      return array(
+        'cmd',
+        '/c',
+        'start',
+      );
     }
 
-    $candidates = array('sensible-browser', 'xdg-open', 'open');
+    $candidates = array(
+      'sensible-browser' => array('sensible-browser'),
+      'xdg-open' => array('xdg-open'),
+      'open' => array('open', '--'),
+    );
 
     // NOTE: The "open" command works well on OS X, but on many Linuxes "open"
     // exists and is not a browser. For now, we're just looking for other
     // commands first, but we might want to be smarter about selecting "open"
     // only on OS X.
 
-    foreach ($candidates as $cmd) {
+    foreach ($candidates as $cmd => $argv) {
       if (Filesystem::binaryExists($cmd)) {
-        return $cmd;
+        return $argv;
       }
     }
 
@@ -2239,8 +2269,12 @@ abstract class ArcanistWorkflow extends Phobject {
     return $this->getConfigurationSourceList()->getConfig($key);
   }
 
-  final public function canHandleSignal($signo) {
+  public function canHandleSignal($signo) {
     return false;
+  }
+
+  public function handleSignal($signo) {
+    return;
   }
 
   final public function newCommand(PhutilExecutableFuture $future) {

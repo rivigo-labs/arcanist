@@ -7,10 +7,14 @@
  */
 abstract class Future extends Phobject {
 
-  protected static $handlerInstalled = null;
-
-  protected $result;
-  protected $exception;
+  private $hasResult = false;
+  private $hasStarted = false;
+  private $hasEnded = false;
+  private $result;
+  private $exception;
+  private $futureKey;
+  private $serviceProfilerCallID;
+  private static $nextKey = 1;
 
   /**
    * Is this future's process complete? Specifically, can this future be
@@ -25,59 +29,116 @@ abstract class Future extends Phobject {
    * Resolve a future and return its result, blocking until the result is ready
    * if necessary.
    *
-   * @param  float Optional timeout after which resolution will pause and
-   *               execution will return to the caller.
-   * @return mixed Future result, or null if the timeout is hit.
+   * @return wild Future result.
    */
-  public function resolve($timeout = null) {
-    $start = microtime(true);
-    $wait  = $this->getDefaultWait();
-    do {
-      $this->checkException();
-      if ($this->isReady()) {
-        break;
-      }
+  public function resolve() {
+    $args = func_get_args();
+    if (count($args)) {
+      throw new Exception(
+        pht(
+          'Parameter "timeout" to "Future->resolve()" is no longer '.
+          'supported. Update the caller so it no longer passes a '.
+          'timeout.'));
+    }
 
-      $read = $this->getReadSockets();
-      $write = $this->getWriteSockets();
+    if ($this->hasException()) {
+      throw $this->getException();
+    }
 
-      if ($timeout !== null) {
-        $elapsed = microtime(true) - $start;
+    if (!$this->hasResult()) {
+      $graph = new FutureIterator(array($this));
+      $graph->resolveAll();
+    }
 
-        if ($elapsed > $timeout) {
-          $this->checkException();
-          return null;
-        } else {
-          $wait = $timeout - $elapsed;
-        }
-      }
-
-      if ($read || $write) {
-        self::waitForSockets($read, $write, $wait);
-      }
-    } while (true);
-
-    $this->checkException();
     return $this->getResult();
   }
 
-  public function setException(Exception $ex) {
-    $this->exception = $ex;
-    return $this;
-  }
-
-  public function getException() {
-    return $this->exception;
-  }
-
-
-  /**
-   * If an exception was set by setException(), throw it.
-   */
-  private function checkException() {
-    if ($this->exception) {
-      throw $this->exception;
+  final public function startFuture() {
+    if ($this->hasStarted) {
+      throw new Exception(
+        pht(
+          'Future has already started; futures can not start more '.
+          'than once.'));
     }
+    $this->hasStarted = true;
+
+    $this->startServiceProfiler();
+    $this->isReady();
+  }
+
+  final public function updateFuture() {
+    if ($this->hasException()) {
+      return;
+    }
+
+    if ($this->hasResult()) {
+      return;
+    }
+
+    try {
+      $this->isReady();
+    } catch (Exception $ex) {
+      $this->setException($ex);
+    } catch (Throwable $ex) {
+      $this->setException($ex);
+    }
+  }
+
+  final public function endFuture() {
+    if (!$this->hasException() && !$this->hasResult()) {
+      throw new Exception(
+        pht(
+          'Trying to end a future which has no exception and no result. '.
+          'Futures must resolve before they can be ended.'));
+    }
+
+    if ($this->hasEnded) {
+      throw new Exception(
+        pht(
+          'Future has already ended; futures can not end more '.
+          'than once.'));
+    }
+    $this->hasEnded = true;
+
+    $this->endServiceProfiler();
+  }
+
+  private function startServiceProfiler() {
+
+    // NOTE: This is a soft dependency so that we don't need to build the
+    // ServiceProfiler into the Phage agent. Normally, this class is always
+    // available.
+
+    if (!class_exists('PhutilServiceProfiler')) {
+      return;
+    }
+
+    $params = $this->getServiceProfilerStartParameters();
+
+    $profiler = PhutilServiceProfiler::getInstance();
+    $call_id = $profiler->beginServiceCall($params);
+
+    $this->serviceProfilerCallID = $call_id;
+  }
+
+  private function endServiceProfiler() {
+    $call_id = $this->serviceProfilerCallID;
+    if ($call_id === null) {
+      return;
+    }
+
+    $params = $this->getServiceProfilerResultParameters();
+
+    $profiler = PhutilServiceProfiler::getInstance();
+    $profiler->endServiceCall($call_id, $params);
+  }
+
+  protected function getServiceProfilerStartParameters() {
+    return array();
+  }
+
+  protected function getServiceProfilerResultParameters() {
+    return array();
   }
 
 
@@ -85,7 +146,7 @@ abstract class Future extends Phobject {
    * Retrieve a list of sockets which we can wait to become readable while
    * a future is resolving. If your future has sockets which can be
    * `select()`ed, return them here (or in @{method:getWriteSockets}) to make
-   * the resolve loop  do a `select()`. If you do not return sockets in either
+   * the resolve loop do a `select()`. If you do not return sockets in either
    * case, you'll get a busy wait.
    *
    * @return list  A list of sockets which we expect to become readable.
@@ -107,72 +168,6 @@ abstract class Future extends Phobject {
 
 
   /**
-   * Wait for activity on one of several sockets.
-   *
-   * @param  list  List of sockets expected to become readable.
-   * @param  list  List of sockets expected to become writable.
-   * @param  float Timeout, in seconds.
-   * @return void
-   */
-  public static function waitForSockets(
-    array $read_list,
-    array $write_list,
-    $timeout = 1) {
-    if (!self::$handlerInstalled) {
-      //  If we're spawning child processes, we need to install a signal handler
-      //  here to catch cases like execing '(sleep 60 &) &' where the child
-      //  exits but a socket is kept open. But we don't actually need to do
-      //  anything because the SIGCHLD will interrupt the stream_select(), as
-      //  long as we have a handler registered.
-      if (function_exists('pcntl_signal')) {
-        if (!pcntl_signal(SIGCHLD, array(__CLASS__, 'handleSIGCHLD'))) {
-          throw new Exception(pht('Failed to install signal handler!'));
-        }
-      }
-      self::$handlerInstalled = true;
-    }
-
-    $timeout_sec = (int)$timeout;
-    $timeout_usec = (int)(1000000 * ($timeout - $timeout_sec));
-
-    $exceptfds = array();
-    $ok = @stream_select(
-      $read_list,
-      $write_list,
-      $exceptfds,
-      $timeout_sec,
-      $timeout_usec);
-
-    if ($ok === false) {
-      // Hopefully, means we received a SIGCHLD. In the worst case, we degrade
-      // to a busy wait.
-    }
-  }
-
-  public static function handleSIGCHLD($signo) {
-    // This function is a dummy, we just need to have some handler registered
-    // so that PHP will get interrupted during stream_select(). If we don't
-    // register a handler, stream_select() won't fail.
-  }
-
-
-  /**
-   * Retrieve the final result of the future. This method will be called after
-   * the future is ready (as per @{method:isReady}) but before results are
-   * passed back to the caller. The major use of this function is that you can
-   * override it in subclasses to do postprocessing or error checking, which is
-   * particularly useful if building application-specific futures on top of
-   * primitive transport futures (like @{class:CurlFuture} and
-   * @{class:ExecFuture}) which can make it tricky to hook this logic into the
-   * main pipeline.
-   *
-   * @return mixed   Final resolution of this future.
-   */
-  protected function getResult() {
-    return $this->result;
-  }
-
-  /**
    * Default amount of time to wait on stream select for this future. Normally
    * 1 second is fine, but if the future has a timeout sooner than that it
    * should return the amount of time left before the timeout.
@@ -184,6 +179,75 @@ abstract class Future extends Phobject {
   public function start() {
     $this->isReady();
     return $this;
+  }
+
+  /**
+   * Retrieve the final result of the future.
+   *
+   * @return wild Final resolution of this future.
+   */
+  final protected function getResult() {
+    if (!$this->hasResult()) {
+      throw new Exception(
+        pht(
+          'Future has not yet resolved. Resolve futures before retrieving '.
+          'results.'));
+    }
+
+    return $this->result;
+  }
+
+  final protected function setResult($result) {
+    if ($this->hasResult()) {
+      throw new Exception(
+        pht(
+          'Future has already resolved. Futures may not resolve more than '.
+          'once.'));
+    }
+
+    $this->hasResult = true;
+    $this->result = $result;
+
+    return $this;
+  }
+
+  final public function hasResult() {
+    return $this->hasResult;
+  }
+
+  final private function setException($exception) {
+    // NOTE: The parameter may be an Exception or a Throwable.
+    $this->exception = $exception;
+    return $this;
+  }
+
+  final private function getException() {
+    return $this->exception;
+  }
+
+  final public function hasException() {
+    return ($this->exception !== null);
+  }
+
+  final public function setFutureKey($key) {
+    if ($this->futureKey !== null) {
+      throw new Exception(
+        pht(
+          'Future already has a key ("%s") assigned.',
+          $key));
+    }
+
+    $this->futureKey = $key;
+
+    return $this;
+  }
+
+  final public function getFutureKey() {
+    if ($this->futureKey === null) {
+      $this->futureKey = sprintf('Future/%d', self::$nextKey++);
+    }
+
+    return $this->futureKey;
   }
 
 }

@@ -231,15 +231,7 @@ final class ExecFuture extends PhutilExecutableFuture {
   /**
    * Permanently discard the stdout and stderr buffers and reset the read
    * cursors. This is basically useful only if you are streaming a large amount
-   * of data from some process:
-   *
-   *   $future = new ExecFuture('zcat huge_file.gz');
-   *   do {
-   *     $done = $future->resolve(0.1);   // Every 100ms,
-   *     list($stdout) = $future->read(); // read output...
-   *     echo $stdout;                    // send it somewhere...
-   *     $future->discardBuffers();       // and then free the buffers.
-   *   } while ($done === null);
+   * of data from some process.
    *
    * Conceivably you might also need to do this if you're writing a client using
    * @{class:ExecFuture} and `netcat`, but you probably should not do that.
@@ -316,8 +308,8 @@ final class ExecFuture extends PhutilExecutableFuture {
    * @return pair  <$stdout, $stderr> pair.
    * @task resolve
    */
-  public function resolvex($timeout = null) {
-    list($err, $stdout, $stderr) = $this->resolve($timeout);
+  public function resolvex() {
+    list($err, $stdout, $stderr) = $this->resolve();
     if ($err) {
       $cmd = $this->getCommand();
 
@@ -352,8 +344,8 @@ final class ExecFuture extends PhutilExecutableFuture {
    * @return array PHP array, decoded from JSON command output.
    * @task resolve
    */
-  public function resolveJSON($timeout = null) {
-    list($stdout, $stderr) = $this->resolvex($timeout);
+  public function resolveJSON() {
+    list($stdout, $stderr) = $this->resolvex();
     if (strlen($stderr)) {
       $cmd = $this->getCommand();
       throw new CommandException(
@@ -389,22 +381,25 @@ final class ExecFuture extends PhutilExecutableFuture {
    * @task resolve
    */
   public function resolveKill() {
-    if (!$this->result) {
+    if (!$this->hasResult()) {
       $signal = 9;
 
       if ($this->proc) {
         proc_terminate($this->proc, $signal);
       }
 
-      $this->result = array(
+      $result = array(
         128 + $signal,
         $this->stdout,
         $this->stderr,
       );
+
+      $this->setResult($result);
+
       $this->closeProcess();
     }
 
-    return $this->result;
+    return $this->getResult();
   }
 
 
@@ -535,23 +530,12 @@ final class ExecFuture extends PhutilExecutableFuture {
    * @task internal
    */
   public function isReady() {
-    // NOTE: We have soft dependencies on PhutilServiceProfiler and
-    // PhutilErrorTrap here. These dependencies are soft to avoid the need to
-    // build them into the Phage agent. Under normal circumstances, these
-    // classes are always available.
+    // NOTE: We have a soft dependencies on PhutilErrorTrap here, to avoid
+    // the need to build it into the Phage agent. Under normal circumstances,
+    // this class are always available.
 
     if (!$this->pipes) {
       $is_windows = phutil_is_windows();
-
-      // NOTE: See note above about Phage.
-      if (class_exists('PhutilServiceProfiler')) {
-        $profiler = PhutilServiceProfiler::getInstance();
-        $this->profilerCallID = $profiler->beginServiceCall(
-          array(
-            'type'    => 'exec',
-            'command' => phutil_string_cast($this->getCommand()),
-          ));
-      }
 
       if (!$this->start) {
         // We might already have started the timer via initiating resolution.
@@ -621,6 +605,9 @@ final class ExecFuture extends PhutilExecutableFuture {
         $trap->destroy();
       } else {
         $err = error_get_last();
+        if ($err) {
+          $err = $err['message'];
+        }
       }
 
       if ($is_windows) {
@@ -634,18 +621,21 @@ final class ExecFuture extends PhutilExecutableFuture {
         // it fails to resolve the command.
 
         // When you run an invalid command on a Windows system, we bypass the
-        // shell and the "proc_open()" itself fails. Throw a "CommandException"
-        // here for consistency with the Linux behavior in this common failure
-        // case.
+        // shell and the "proc_open()" itself fails. See also T13504. Fail the
+        // future immediately, acting as though it exited with an error code
+        // for consistency with Linux.
 
-        throw new CommandException(
+        $result = array(
+          1,
+          '',
           pht(
             'Call to "proc_open()" to open a subprocess failed: %s',
             $err),
-          $this->getCommand(),
-          1,
-          '',
-          '');
+        );
+
+        $this->setResult($result);
+
+        return true;
       }
 
       if ($is_windows) {
@@ -762,21 +752,33 @@ final class ExecFuture extends PhutilExecutableFuture {
     }
 
     if ($is_done) {
+      $signal_info = null;
+
       // If the subprocess got nuked with `kill -9`, we get a -1 exitcode.
       // Upgrade this to a slightly more informative value by examining the
       // terminating signal code.
       $err = $status['exitcode'];
       if ($err == -1) {
         if ($status['signaled']) {
-          $err = 128 + $status['termsig'];
+          $signo = $status['termsig'];
+
+          $err = 128 + $signo;
+
+          $signal_info = pht(
+            "<Process was terminated by signal %s (%d).>\n\n",
+            phutil_get_signal_name($signo),
+            $signo);
         }
       }
 
-      $this->result = array(
+      $result = array(
         $err,
         $this->stdout,
-        $this->stderr,
+        $signal_info.$this->stderr,
       );
+
+      $this->setResult($result);
+
       $this->closeProcess();
       return true;
     }
@@ -845,16 +847,6 @@ final class ExecFuture extends PhutilExecutableFuture {
 
     unset($this->windowsStdoutTempFile);
     unset($this->windowsStderrTempFile);
-
-    if ($this->profilerCallID !== null) {
-      $profiler = PhutilServiceProfiler::getInstance();
-      $profiler->endServiceCall(
-        $this->profilerCallID,
-        array(
-          'err' => $this->result ? idx($this->result, 0) : null,
-        ));
-      $this->profilerCallID = null;
-    }
   }
 
 
@@ -952,5 +944,26 @@ final class ExecFuture extends PhutilExecutableFuture {
       }
     }
   }
+
+  protected function getServiceProfilerStartParameters() {
+    return array(
+      'type' => 'exec',
+      'command' => phutil_string_cast($this->getCommand()),
+    );
+  }
+
+  protected function getServiceProfilerResultParameters() {
+    if ($this->hasResult()) {
+      $result = $this->getResult();
+      $err = idx($result, 0);
+    } else {
+      $err = null;
+    }
+
+    return array(
+      'err' => $err,
+    );
+  }
+
 
 }
