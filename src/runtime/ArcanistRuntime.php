@@ -8,6 +8,12 @@ final class ArcanistRuntime {
 
   private $stack = array();
 
+  private $viewer;
+  private $hardpointEngine;
+  private $symbolEngine;
+  private $conduitEngine;
+  private $workingCopy;
+
   public function execute(array $argv) {
 
     try {
@@ -107,7 +113,8 @@ final class ArcanistRuntime {
     $workflows = $this->newWorkflows($toolset);
     $this->workflows = $workflows;
 
-    $conduit_engine = $this->newConduitEngine($config);
+    $conduit_engine = $this->newConduitEngine($config, $args);
+    $this->conduitEngine = $conduit_engine;
 
     $phutil_workflows = array();
     foreach ($workflows as $key => $workflow) {
@@ -140,6 +147,12 @@ final class ArcanistRuntime {
       ->setWorkflows($workflows)
       ->setConfigurationSourceList($config)
       ->resolveAliases($unconsumed_argv);
+
+    foreach ($alias_effects as $alias_effect) {
+      if ($alias_effect->getType() === ArcanistAliasEffect::EFFECT_SHELL) {
+        return $this->executeShellAlias($alias_effect);
+      }
+    }
 
     $result_argv = $this->applyAliasEffects($alias_effects, $unconsumed_argv);
 
@@ -295,9 +308,14 @@ final class ArcanistRuntime {
       ->setArguments($args);
 
     $working_copy = ArcanistWorkingCopy::newFromWorkingDirectory(getcwd());
-    if ($working_copy) {
-      $engine->setWorkingCopy($working_copy);
-    }
+
+    $engine->setWorkingCopy($working_copy);
+
+    $this->workingCopy = $working_copy;
+
+    $working_copy
+      ->getRepositoryAPI()
+      ->setRuntime($this);
 
     return $engine;
   }
@@ -676,16 +694,38 @@ final class ArcanistRuntime {
     return $this->stack;
   }
 
-  private function newConduitEngine(ArcanistConfigurationSourceList $config) {
+  public function getCurrentWorkflow() {
+    return last($this->stack);
+  }
 
-    $conduit_uri = $config->getConfig('phabricator.uri');
-    if ($conduit_uri === null) {
-      // For now, read this older config from raw storage. There is currently
-      // no definition of this option in the "toolsets" config list, and it
-      // would be nice to get rid of it.
-      $default_list = $config->getStorageValueList('default');
-      if ($default_list) {
-        $conduit_uri = last($default_list)->getValue();
+  private function newConduitEngine(
+    ArcanistConfigurationSourceList $config,
+    PhutilArgumentParser $args) {
+
+    try {
+      $force_uri = $args->getArg('conduit-uri');
+    } catch (PhutilArgumentSpecificationException $ex) {
+      $force_uri = null;
+    }
+
+    try {
+      $force_token = $args->getArg('conduit-token');
+    } catch (PhutilArgumentSpecificationException $ex) {
+      $force_token = null;
+    }
+
+    if ($force_uri !== null) {
+      $conduit_uri = $force_uri;
+    } else {
+      $conduit_uri = $config->getConfig('phabricator.uri');
+      if ($conduit_uri === null) {
+        // For now, read this older config from raw storage. There is currently
+        // no definition of this option in the "toolsets" config list, and it
+        // would be nice to get rid of it.
+        $default_list = $config->getStorageValueList('default');
+        if ($default_list) {
+          $conduit_uri = last($default_list)->getValue();
+        }
       }
     }
 
@@ -709,22 +749,113 @@ final class ArcanistRuntime {
     // TODO: This isn't using "getConfig()" because we aren't defining a
     // real config entry for the moment.
 
-    $hosts = array();
+    if ($force_token !== null) {
+      $conduit_token = $force_token;
+    } else {
+      $hosts = array();
 
-    $hosts_list = $config->getStorageValueList('hosts');
-    foreach ($hosts_list as $hosts_config) {
-      $hosts += $hosts_config->getValue();
+      $hosts_list = $config->getStorageValueList('hosts');
+      foreach ($hosts_list as $hosts_config) {
+        $hosts += $hosts_config->getValue();
+      }
+
+      $host_config = idx($hosts, $conduit_uri, array());
+      $conduit_token = idx($host_config, 'token');
     }
-
-    $host_config = idx($hosts, $conduit_uri, array());
-    $user_name = idx($host_config, 'user');
-    $conduit_token = idx($host_config, 'token');
 
     if ($conduit_token !== null) {
       $engine->setConduitToken($conduit_token);
     }
 
     return $engine;
+  }
+
+  private function executeShellAlias(ArcanistAliasEffect $effect) {
+    $log = $this->getLogEngine();
+
+    $message = $effect->getMessage();
+    if ($message !== null) {
+      $log->writeHint(pht('SHELL ALIAS'), $message);
+    }
+
+    return phutil_passthru('%Ls', $effect->getArguments());
+  }
+
+  public function getSymbolEngine() {
+    if ($this->symbolEngine === null) {
+      $this->symbolEngine = $this->newSymbolEngine();
+    }
+    return $this->symbolEngine;
+  }
+
+  private function newSymbolEngine() {
+    return id(new ArcanistSymbolEngine())
+      ->setWorkflow($this);
+  }
+
+  public function getHardpointEngine() {
+    if ($this->hardpointEngine === null) {
+      $this->hardpointEngine = $this->newHardpointEngine();
+    }
+    return $this->hardpointEngine;
+  }
+
+  private function newHardpointEngine() {
+    $engine = new ArcanistHardpointEngine();
+
+    $queries = ArcanistRuntimeHardpointQuery::getAllQueries();
+
+    foreach ($queries as $key => $query) {
+      $queries[$key] = id(clone $query)
+        ->setRuntime($this);
+    }
+
+    $engine->setQueries($queries);
+
+    return $engine;
+  }
+
+  public function getViewer() {
+    if (!$this->viewer) {
+      $viewer = $this->getSymbolEngine()
+        ->loadUserForSymbol('viewer()');
+
+      // TODO: Deal with anonymous stuff.
+      if (!$viewer) {
+        throw new Exception(pht('No viewer!'));
+      }
+
+      $this->viewer = $viewer;
+    }
+
+    return $this->viewer;
+  }
+
+  public function loadHardpoints($objects, $requests) {
+    if (!is_array($objects)) {
+      $objects = array($objects);
+    }
+
+    if (!is_array($requests)) {
+      $requests = array($requests);
+    }
+
+    $engine = $this->getHardpointEngine();
+
+    $requests = $engine->requestHardpoints(
+      $objects,
+      $requests);
+
+    // TODO: Wait for only the required requests.
+    $engine->waitForRequests(array());
+  }
+
+  public function getWorkingCopy() {
+    return $this->workingCopy;
+  }
+
+  public function getConduitEngine() {
+    return $this->conduitEngine;
   }
 
 }

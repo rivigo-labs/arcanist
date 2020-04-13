@@ -3,70 +3,62 @@
 /**
  * Browse files or objects in the Phabricator web interface.
  */
-final class ArcanistBrowseWorkflow extends ArcanistWorkflow {
+final class ArcanistBrowseWorkflow
+  extends ArcanistArcWorkflow {
 
   public function getWorkflowName() {
     return 'browse';
   }
 
-  public function getCommandSynopses() {
-    return phutil_console_format(<<<EOTEXT
-      **browse** [__options__] __path__ ...
-      **browse** [__options__] __object__ ...
+  public function getWorkflowInformation() {
+    $help = pht(<<<EOTEXT
+Open a file or object (like a task or revision) in a local web browser.
+
+  $ arc browse README   # Open a file in Diffusion.
+  $ arc browse T123     # View a task.
+  $ arc browse HEAD     # View a symbolic commit.
+
+To choose a browser binary to invoke, use:
+
+  $ arc set-config browser __browser-binary__
+
+If no browser is set, the command will try to guess which browser to use.
 EOTEXT
       );
+
+    return $this->newWorkflowInformation()
+      ->setSynopsis(pht('Open a file or object in a local web browser.'))
+      ->addExample('**browse** [options] -- __target__ ...')
+      ->addExample('**browse** -- __file-name__')
+      ->addExample('**browse** -- __object-name__')
+      ->setHelp($help);
   }
 
-  public function getCommandHelp() {
-    return phutil_console_format(<<<EOTEXT
-          Supports: git, hg, svn
-          Open a file or object (like a task or revision) in your web browser.
-
-            $ arc browse README   # Open a file in Diffusion.
-            $ arc browse T123     # View a task.
-            $ arc browse HEAD     # View a symbolic commit.
-
-          Set the 'browser' value using 'arc set-config' to select a browser. If
-          no browser is set, the command will try to guess which browser to use.
-EOTEXT
-      );
-  }
-
-  public function getArguments() {
+  public function getWorkflowArguments() {
     return array(
-      'branch' => array(
-        'param' => 'branch_name',
-        'help' => pht(
-          'Default branch name to view on server. Defaults to "%s".',
-          'master'),
-      ),
-      'types' => array(
-        'param' => 'types',
-        'aliases' => array('type'),
-        'help' => pht(
-          'Parse arguments with particular types.'),
-      ),
-      'force' => array(
-        'help' => pht(
-          '(DEPRECATED) Obsolete, use "--types path" instead.'),
-      ),
-      '*' => 'targets',
+      $this->newWorkflowArgument('branch')
+        ->setParameter('branch-name')
+        ->setHelp(
+          pht(
+            'Default branch name to view on server. Defaults to "%s".',
+            'master')),
+      $this->newWorkflowArgument('types')
+        ->setParameter('type-list')
+        ->setHelp(
+          pht(
+            'Force targets to be interpreted as naming particular types of '.
+            'resources.')),
+      $this->newWorkflowArgument('force')
+        ->setHelp(
+          pht(
+            '(DEPRECATED) Obsolete, use "--types path" instead.')),
+      $this->newWorkflowArgument('targets')
+        ->setIsPathArgument(true)
+        ->setWildcard(true),
     );
   }
 
-  public function desiresWorkingCopy() {
-    return true;
-  }
-
-  public function desiresRepositoryAPI() {
-    return true;
-  }
-
-  public function run() {
-    $conduit = $this->getConduitEngine();
-
-    $console = PhutilConsole::getConsole();
-
+  public function runWorkflow() {
     $targets = $this->getArgument('targets');
     $targets = array_fuse($targets);
 
@@ -90,7 +82,7 @@ EOTEXT
         pht(
           'Argument "--force" for "arc browse" is deprecated. Use '.
           '"--type %s" instead.',
-          ArcanistBrowsePathURIHardpointLoader::BROWSETYPE));
+          ArcanistBrowsePathURIHardpointQuery::BROWSETYPE));
     }
 
     $types = $this->getArgument('types');
@@ -98,7 +90,7 @@ EOTEXT
       $types = preg_split('/[\s,]+/', $types);
     } else {
       if ($is_force) {
-        $types = array(ArcanistBrowsePathURIHardpointLoader::BROWSETYPE);
+        $types = array(ArcanistBrowsePathURIHardpointQuery::BROWSETYPE);
       } else {
         $types = array();
       }
@@ -115,23 +107,20 @@ EOTEXT
       }
     }
 
-    $loaders = ArcanistBrowseURIHardpointLoader::getAllBrowseLoaders();
-    foreach ($loaders as $key => $loader) {
-      $loaders[$key] = clone $loader;
-    }
+    // TODO: The "Path" and "Commit" queries should regain the ability to warn
+    // when this command is not run in a working copy that belongs to a
+    // recognized repository, so they won't ever be able to resolve things.
 
-    $query = $this->newRefQuery($refs)
-      ->needHardpoints(
-        array(
-          'uris',
-        ))
-      ->setLoaders($loaders);
+    // TODO: When you run "arc browse" with no arguments, we should either
+    // take you to the repository home page or show help.
 
-    foreach ($loaders as $loader) {
-      $loader->willLoadBrowseURIRefs($refs);
-    }
+    // TODO: When you "arc browse something/like/a/path.c" but it does not
+    // exist on disk, it is not resolved unless you explicitly use "--type
+    // path". This should be explained more clearly again.
 
-    $query->execute();
+    $this->loadHardpoints(
+      $refs,
+      ArcanistBrowseRef::HARDPOINT_URIS);
 
     $zero_hits = array();
     $open_uris = array();
@@ -229,10 +218,6 @@ EOTEXT
               $ref->getToken()));
         }
       }
-
-      foreach ($loaders as $loader) {
-        $loader->didFailToLoadBrowseURIRefs($refs);
-      }
     }
 
     $uris = array();
@@ -248,7 +233,24 @@ EOTEXT
       }
 
       $ref_uri = head($ref_uris);
-      $uris[] = $ref_uri->getURI();
+
+      // TODO: "ArcanistRevisionRef", at least, may return a relative URI.
+      // If we get a relative URI, guess the correct absolute URI based on
+      // the Conduit URI. This might not be correct for Conduit over SSH.
+
+      $raw_uri = $ref_uri->getURI();
+
+      $raw_uri = new PhutilURI($raw_uri);
+      if (!strlen($raw_uri->getDomain())) {
+        $base_uri = $this->getConduitEngine()
+          ->getConduitURI();
+
+        $raw_uri = id(new PhutilURI($base_uri))
+          ->setPath($raw_uri->getPath());
+      }
+      $raw_uri = phutil_string_cast($raw_uri);
+
+      $uris[] = $raw_uri;
     }
 
     $this->openURIsInBrowser($uris);

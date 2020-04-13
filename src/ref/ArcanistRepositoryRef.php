@@ -6,12 +6,8 @@ final class ArcanistRepositoryRef
   private $phid;
   private $browseURI;
 
-  public function getRefIdentifier() {
+  public function getRefDisplayName() {
     return pht('Remote Repository');
-  }
-
-  public function defineHardpoints() {
-    return array();
   }
 
   public function setPHID($phid) {
