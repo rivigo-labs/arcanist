@@ -6,12 +6,8 @@ final class ArcanistBrowseURIRef
   private $uri;
   private $type;
 
-  public function getRefIdentifier() {
+  public function getRefDisplayName() {
     return pht('Browse URI "%s"', $this->getURI());
-  }
-
-  public function defineHardpoints() {
-    return array();
   }
 
   public function setURI($uri) {

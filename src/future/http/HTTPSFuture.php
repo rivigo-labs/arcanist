@@ -194,7 +194,7 @@ final class HTTPSFuture extends BaseHTTPFuture {
   }
 
   public function isReady() {
-    if (isset($this->result)) {
+    if ($this->hasResult()) {
       return true;
     }
 
@@ -211,13 +211,9 @@ final class HTTPSFuture extends BaseHTTPFuture {
       $uri_object = new PhutilURI($uri);
       $proxy = PhutilHTTPEngineExtension::buildHTTPProxyURI($uri_object);
 
-      $profiler = PhutilServiceProfiler::getInstance();
-      $this->profilerCallID = $profiler->beginServiceCall(
-        array(
-          'type' => 'http',
-          'uri' => $uri,
-          'proxy' => (string)$proxy,
-        ));
+      // TODO: Currently, the "proxy" is not passed to the ServiceProfiler
+      // because of changes to how ServiceProfiler is integrated. It would
+      // be nice to pass it again.
 
       if (!self::$multi) {
         self::$multi = curl_multi_init();
@@ -476,7 +472,7 @@ final class HTTPSFuture extends BaseHTTPFuture {
 
       $body = null;
       $headers = array();
-      $this->result = array($status, $body, $headers);
+      $this->setResult(array($status, $body, $headers));
     } else if ($this->parser) {
       $streaming_parser = $this->parser;
       try {
@@ -491,12 +487,12 @@ final class HTTPSFuture extends BaseHTTPFuture {
         $result = array($ex, null, array());
       }
 
-      $this->result = $result;
+      $this->setResult($result);
     } else {
       // cURL returns headers of all redirects, we strip all but the final one.
       $redirects = curl_getinfo($curl, CURLINFO_REDIRECT_COUNT);
       $result = preg_replace('/^(.*\r\n\r\n){'.$redirects.'}/sU', '', $result);
-      $this->result = $this->parseRawHTTPResponse($result);
+      $this->setResult($this->parseRawHTTPResponse($result));
     }
 
     curl_multi_remove_handle(self::$multi, $curl);
@@ -518,16 +514,13 @@ final class HTTPSFuture extends BaseHTTPFuture {
 
     $sink = $this->getProgressSink();
     if ($sink) {
-      $status = head($this->result);
+      $status = head($this->getResult());
       if ($status->isError()) {
         $sink->didFailWork();
       } else {
         $sink->didCompleteWork();
       }
     }
-
-    $profiler = PhutilServiceProfiler::getInstance();
-    $profiler->endServiceCall($this->profilerCallID, array());
 
     return true;
   }
@@ -819,6 +812,13 @@ final class HTTPSFuture extends BaseHTTPFuture {
 
   private function isDownload() {
    return ($this->downloadPath !== null);
+  }
+
+  protected function getServiceProfilerStartParameters() {
+    return array(
+      'type' => 'http',
+      'uri' => phutil_string_cast($this->getURI()),
+    );
   }
 
 }

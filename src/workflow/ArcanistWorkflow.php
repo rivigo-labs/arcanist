@@ -76,6 +76,8 @@ abstract class ArcanistWorkflow extends Phobject {
   private $configurationEngine;
   private $configurationSourceList;
 
+  private $promptMap;
+
   final public function setToolset(ArcanistToolset $toolset) {
     $this->toolset = $toolset;
     return $this;
@@ -126,6 +128,20 @@ abstract class ArcanistWorkflow extends Phobject {
       ->setArguments($specs);
 
     $information = $this->getWorkflowInformation();
+
+    if ($information !== null) {
+      if (!($information instanceof ArcanistWorkflowInformation)) {
+        throw new Exception(
+          pht(
+            'Expected workflow ("%s", of class "%s") to return an '.
+            '"ArcanistWorkflowInformation" object from call to '.
+            '"getWorkflowInformation()", got %s.',
+            $this->getWorkflowName(),
+            get_class($this),
+            phutil_describe_type($information)));
+      }
+    }
+
     if ($information) {
       $synopsis = $information->getSynopsis();
       if (strlen($synopsis)) {
@@ -322,6 +338,16 @@ abstract class ArcanistWorkflow extends Phobject {
   }
 
   final public function getConfigFromAnySource($key) {
+    $source_list = $this->getConfigurationSourceList();
+    if ($source_list) {
+      $value_list = $source_list->getStorageValueList($key);
+      if ($value_list) {
+        return last($value_list)->getValue();
+      }
+
+      return null;
+    }
+
     return $this->configurationManager->getConfigFromAnySource($key);
   }
 
@@ -870,6 +896,31 @@ abstract class ArcanistWorkflow extends Phobject {
   }
 
   final public function getWorkingCopy() {
+    $configuration_engine = $this->getConfigurationEngine();
+
+    // TOOLSETS: Remove this once all workflows are toolset workflows.
+    if (!$configuration_engine) {
+      throw new Exception(
+        pht(
+          'This workflow has not yet been updated to Toolsets and can '.
+          'not retrieve a modern WorkingCopy object. Use '.
+          '"getWorkingCopyIdentity()" to retrieve a previous-generation '.
+          'object.'));
+    }
+
+    return $configuration_engine->getWorkingCopy();
+  }
+
+
+  final public function getWorkingCopyIdentity() {
+    $configuration_engine = $this->getConfigurationEngine();
+    if ($configuration_engine) {
+      $working_copy = $configuration_engine->getWorkingCopy();
+      $working_path = $working_copy->getWorkingDirectory();
+
+      return ArcanistWorkingCopyIdentity::newFromPath($working_path);
+    }
+
     $working_copy = $this->getConfigurationManager()->getWorkingCopyIdentity();
     if (!$working_copy) {
       $workflow = get_class($this);
@@ -897,6 +948,12 @@ abstract class ArcanistWorkflow extends Phobject {
   }
 
   final public function getRepositoryAPI() {
+    $configuration_engine = $this->getConfigurationEngine();
+    if ($configuration_engine) {
+      $working_copy = $configuration_engine->getWorkingCopy();
+      return $working_copy->getRepositoryAPI();
+    }
+
     if (!$this->repositoryAPI) {
       $workflow = get_class($this);
       throw new Exception(
@@ -1535,7 +1592,7 @@ abstract class ArcanistWorkflow extends Phobject {
     }
 
     if ($paths) {
-      $working_copy = $this->getWorkingCopy();
+      $working_copy = $this->getWorkingCopyIdentity();
       foreach ($paths as $key => $path) {
         $full_path = Filesystem::resolvePath($path);
         if (!Filesystem::pathExists($full_path)) {
@@ -1717,9 +1774,9 @@ abstract class ArcanistWorkflow extends Phobject {
     return $parser;
   }
 
-  final protected function resolveCall(ConduitFuture $method, $timeout = null) {
+  final protected function resolveCall(ConduitFuture $method) {
     try {
-      return $method->resolve($timeout);
+      return $method->resolve();
     } catch (ConduitClientException $ex) {
       if ($ex->getErrorCode() == 'ERR-CONDUIT-CALL') {
         echo phutil_console_wrap(
@@ -1974,7 +2031,7 @@ abstract class ArcanistWorkflow extends Phobject {
    * @return ArcanistLintEngine Constructed engine.
    */
   protected function newLintEngine($engine_class = null) {
-    $working_copy = $this->getWorkingCopy();
+    $working_copy = $this->getWorkingCopyIdentity();
     $config = $this->getConfigurationManager();
 
     if (!$engine_class) {
@@ -2025,7 +2082,7 @@ abstract class ArcanistWorkflow extends Phobject {
    * @return ArcanistUnitTestEngine Constructed engine.
    */
   protected function newUnitTestEngine($engine_class = null) {
-    $working_copy = $this->getWorkingCopy();
+    $working_copy = $this->getWorkingCopyIdentity();
     $config = $this->getConfigurationManager();
 
     if (!$engine_class) {
@@ -2069,15 +2126,21 @@ abstract class ArcanistWorkflow extends Phobject {
 
   protected function openURIsInBrowser(array $uris) {
     $browser = $this->getBrowserCommand();
+
+    // The "browser" may actually be a list of arguments.
+    if (!is_array($browser)) {
+      $browser = array($browser);
+    }
+
     foreach ($uris as $uri) {
-      $err = phutil_passthru('%s %s', $browser, $uri);
+      $err = phutil_passthru('%LR %R', $browser, $uri);
       if ($err) {
         throw new ArcanistUsageException(
           pht(
-            "Failed to open '%s' in browser ('%s'). ".
-            "Check your 'browser' config option.",
+            'Failed to open URI "%s" in browser ("%s"). '.
+            'Check your "browser" config option.',
             $uri,
-            $browser));
+            implode(' ', $browser)));
       }
     }
   }
@@ -2089,19 +2152,29 @@ abstract class ArcanistWorkflow extends Phobject {
     }
 
     if (phutil_is_windows()) {
-      return 'start';
+      // See T13504. We now use "bypass_shell", so "start" alone is no longer
+      // a valid binary to invoke directly.
+      return array(
+        'cmd',
+        '/c',
+        'start',
+      );
     }
 
-    $candidates = array('sensible-browser', 'xdg-open', 'open');
+    $candidates = array(
+      'sensible-browser' => array('sensible-browser'),
+      'xdg-open' => array('xdg-open'),
+      'open' => array('open', '--'),
+    );
 
     // NOTE: The "open" command works well on OS X, but on many Linuxes "open"
     // exists and is not a browser. For now, we're just looking for other
     // commands first, but we might want to be smarter about selecting "open"
     // only on OS X.
 
-    foreach ($candidates as $cmd) {
+    foreach ($candidates as $cmd => $argv) {
       if (Filesystem::binaryExists($cmd)) {
-        return $cmd;
+        return $argv;
       }
     }
 
@@ -2177,47 +2250,18 @@ abstract class ArcanistWorkflow extends Phobject {
     return $this->conduitEngine;
   }
 
-  final protected function newWorkingCopyStateRef() {
-    $ref = new ArcanistWorkingCopyStateRef();
-
-    $working_copy = $this->getWorkingCopy();
-    $ref->setRootDirectory($working_copy->getProjectRoot());
-
-    return $ref;
-  }
-
-  final protected function newRefQuery(array $refs) {
-    assert_instances_of($refs, 'ArcanistRef');
-
-    $query = id(new ArcanistRefQuery())
-      ->setConduitEngine($this->getConduitEngine())
-      ->setRefs($refs);
-
-    if ($this->hasRepositoryAPI()) {
-      $query->setRepositoryAPI($this->getRepositoryAPI());
-    }
-
-    $repository_ref = $this->getRepositoryRef();
-    if ($repository_ref) {
-      $query->setRepositoryRef($repository_ref);
-    }
-
-    $working_copy = $this->getConfigurationManager()->getWorkingCopyIdentity();
-    if ($working_copy) {
-      $working_ref = $this->newWorkingCopyStateRef();
-      $query->setWorkingCopyRef($working_ref);
-    }
-
-    return $query;
-  }
-
   final public function getRepositoryRef() {
-    if (!$this->getConfigurationManager()->getWorkingCopyIdentity()) {
-      return null;
-    }
+    $configuration_engine = $this->getConfigurationEngine();
+    if ($configuration_engine) {
+      // This is a toolset workflow and can always build a repository ref.
+    } else {
+      if (!$this->getConfigurationManager()->getWorkingCopyIdentity()) {
+        return null;
+      }
 
-    if (!$this->repositoryAPI) {
-      return null;
+      if (!$this->repositoryAPI) {
+        return null;
+      }
     }
 
     if (!$this->repositoryRef) {
@@ -2239,14 +2283,91 @@ abstract class ArcanistWorkflow extends Phobject {
     return $this->getConfigurationSourceList()->getConfig($key);
   }
 
-  final public function canHandleSignal($signo) {
+  public function canHandleSignal($signo) {
     return false;
+  }
+
+  public function handleSignal($signo) {
+    return;
   }
 
   final public function newCommand(PhutilExecutableFuture $future) {
     return id(new ArcanistCommand())
       ->setLogEngine($this->getLogEngine())
       ->setExecutableFuture($future);
+  }
+
+  final public function loadHardpoints(
+    $objects,
+    $requests) {
+    return $this->getRuntime()->loadHardpoints($objects, $requests);
+  }
+
+  protected function newPrompts() {
+    return array();
+  }
+
+  protected function newPrompt($key) {
+    return id(new ArcanistPrompt())
+      ->setWorkflow($this)
+      ->setKey($key);
+  }
+
+  public function hasPrompt($key) {
+    $map = $this->getPromptMap();
+    return isset($map[$key]);
+  }
+
+  public function getPromptMap() {
+    if ($this->promptMap === null) {
+      $prompts = $this->newPrompts();
+      assert_instances_of($prompts, 'ArcanistPrompt');
+
+      $map = array();
+      foreach ($prompts as $prompt) {
+        $key = $prompt->getKey();
+
+        if (isset($map[$key])) {
+          throw new Exception(
+            pht(
+              'Workflow ("%s") generates two prompts with the same '.
+              'key ("%s"). Each prompt a workflow generates must have a '.
+              'unique key.',
+              get_class($this),
+              $key));
+        }
+
+        $map[$key] = $prompt;
+      }
+
+      $this->promptMap = $map;
+    }
+
+    return $this->promptMap;
+  }
+
+  protected function getPrompt($key) {
+    $map = $this->getPromptMap();
+
+    $prompt = idx($map, $key);
+    if (!$prompt) {
+      throw new Exception(
+        pht(
+          'Workflow ("%s") is requesting a prompt ("%s") but it did not '.
+          'generate any prompt with that name in "newPrompts()".',
+          get_class($this),
+          $key));
+    }
+
+    return clone $prompt;
+  }
+
+  final protected function getSymbolEngine() {
+    return $this->getRuntime()->getSymbolEngine();
+  }
+
+  final protected function getViewer() {
+    return $this->getRuntime()->getViewer();
   }
 
 }

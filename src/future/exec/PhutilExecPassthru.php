@@ -20,8 +20,6 @@
  */
 final class PhutilExecPassthru extends PhutilExecutableFuture {
 
-  private $passthruResult;
-
 
 /* -(  Executing Passthru Commands  )---------------------------------------- */
 
@@ -35,14 +33,6 @@ final class PhutilExecPassthru extends PhutilExecutableFuture {
    */
   public function execute() {
     $command = $this->getCommand();
-
-    $profiler = PhutilServiceProfiler::getInstance();
-    $call_id = $profiler->beginServiceCall(
-      array(
-        'type'    => 'exec',
-        'subtype' => 'passthru',
-        'command' => $command,
-      ));
 
     $spec  = array(STDIN, STDOUT, STDERR);
     $pipes = array();
@@ -78,20 +68,21 @@ final class PhutilExecPassthru extends PhutilExecutableFuture {
     $trap->destroy();
 
     if (!is_resource($proc)) {
-      throw new Exception(
-        pht(
-          'Failed to passthru %s: %s',
-          'proc_open()',
-          $errors));
+      // See T13504. When "proc_open()" is given a command with a binary
+      // that isn't available on Windows with "bypass_shell", the function
+      // fails entirely.
+      if (phutil_is_windows()) {
+        $err = 1;
+      } else {
+        throw new Exception(
+          pht(
+            'Failed to passthru %s: %s',
+            'proc_open()',
+            $errors));
+      }
+    } else {
+      $err = proc_close($proc);
     }
-
-    $err = proc_close($proc);
-
-    $profiler->endServiceCall(
-      $call_id,
-      array(
-        'err' => $err,
-      ));
 
     return $err;
   }
@@ -105,15 +96,34 @@ final class PhutilExecPassthru extends PhutilExecutableFuture {
     // full control of the console. We're just implementing the interfaces to
     // make it easier to share code with ExecFuture.
 
-    if ($this->passthruResult === null) {
-      $this->passthruResult = $this->execute();
+    if (!$this->hasResult()) {
+      $result = $this->execute();
+      $this->setResult($result);
     }
 
     return true;
   }
 
-  protected function getResult() {
-    return $this->passthruResult;
+
+
+  protected function getServiceProfilerStartParameters() {
+    return array(
+      'type' => 'exec',
+      'subtype' => 'passthru',
+      'command' => phutil_string_cast($this->getCommand()),
+    );
+  }
+
+  protected function getServiceProfilerResultParameters() {
+    if ($this->hasResult()) {
+      $err = $this->getResult();
+    } else {
+      $err = null;
+    }
+
+    return array(
+      'err' => $err,
+    );
   }
 
 }

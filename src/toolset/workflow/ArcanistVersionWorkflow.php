@@ -49,24 +49,25 @@ EOTEXT
 
     foreach ($roots as $lib => $root) {
       $working_copy = ArcanistWorkingCopy::newFromWorkingDirectory($root);
-      $repository_api = $working_copy->newRepositoryAPI();
 
-      if (!$repository_api instanceof ArcanistGitAPI) {
-        throw new ArcanistUsageException(
+      $repository_api = $working_copy->getRepositoryAPI();
+      $is_git = ($repository_api instanceof ArcanistGitAPI);
+
+      if (!$is_git) {
+        throw new PhutilArgumentUsageException(
           pht(
-            'Library "%s" is not a Git working copy, so no version '.
+            'Library "%s" (at "%s") is not a Git working copy, so no version '.
             'information can be provided.',
-            $lib));
+            $lib,
+            Filesystem::readablePath($root)));
       }
 
-      // NOTE: Carefully execute these commands in a way that works on Windows
-      // until T8298 is properly fixed. See PHI52.
-
-      list($commit) = $repository_api->execxLocal('log -1 --format=%%H');
+      list($commit) = $repository_api->execxLocal(
+        'log -1 --format=%s',
+        '%ct%x01%H');
       $commit = trim($commit);
 
-      list($timestamp) = $repository_api->execxLocal('log -1 --format=%%ct');
-      $timestamp = trim($timestamp);
+      list($timestamp, $commit) = explode("\1", $commit);
 
       $console->writeOut(
         "%s %s (%s)\n",

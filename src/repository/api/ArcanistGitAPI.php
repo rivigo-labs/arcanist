@@ -1181,26 +1181,6 @@ final class ArcanistGitAPI extends ArcanistRepositoryAPI {
     return $parser->parseDiff($diff);
   }
 
-  public function supportsLocalBranchMerge() {
-    return true;
-  }
-
-  public function performLocalBranchMerge($branch, $message) {
-    if (!$branch) {
-      throw new ArcanistUsageException(
-        pht('Under git, you must specify the branch you want to merge.'));
-    }
-    $err = phutil_passthru(
-      '(cd %s && git merge --no-ff -m %s %s)',
-      $this->getPath(),
-      $message,
-      $branch);
-
-    if ($err) {
-      throw new ArcanistUsageException(pht('Merge failed!'));
-    }
-  }
-
   public function getFinalizedRevisionMessage() {
     return pht(
       "You may now push this commit upstream, as appropriate (e.g. with ".
@@ -1296,19 +1276,6 @@ final class ArcanistGitAPI extends ArcanistRepositoryAPI {
       $commit);
 
     return trim($summary);
-  }
-
-  public function backoutCommit($commit_hash) {
-    $this->execxLocal('revert %s -n --no-edit', $commit_hash);
-    $this->reloadWorkingCopy();
-    if (!$this->getUncommittedStatus()) {
-      throw new ArcanistUsageException(
-        pht('%s has already been reverted.', $commit_hash));
-    }
-  }
-
-  public function getBackoutMessage($commit_hash) {
-    return pht('This reverts commit %s.', $commit_hash);
   }
 
   public function isGitSubversionRepo() {
@@ -1705,6 +1672,10 @@ final class ArcanistGitAPI extends ArcanistRepositoryAPI {
     }
 
     return null;
+  }
+
+  protected function newCurrentCommitSymbol() {
+    return 'HEAD';
   }
 
 }

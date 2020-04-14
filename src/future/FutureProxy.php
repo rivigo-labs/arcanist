@@ -27,21 +27,27 @@ abstract class FutureProxy extends Future {
   }
 
   public function isReady() {
-    return $this->getProxiedFuture()->isReady();
+    if ($this->hasResult()) {
+      return true;
+    }
+
+    $proxied = $this->getProxiedFuture();
+
+    $is_ready = $proxied->isReady();
+
+    if ($proxied->hasResult()) {
+      $result = $proxied->getResult();
+      $result = $this->didReceiveResult($result);
+      $this->setResult($result);
+    }
+
+    return $is_ready;
   }
 
-  public function resolve($timeout = null) {
-    $this->getProxiedFuture()->resolve($timeout);
+  public function resolve() {
+    $this->getProxiedFuture()->resolve();
+    $this->isReady();
     return $this->getResult();
-  }
-
-  public function setException(Exception $ex) {
-    $this->getProxiedFuture()->setException($ex);
-    return $this;
-  }
-
-  public function getException() {
-    return $this->getProxiedFuture()->getException();
   }
 
   public function getReadSockets() {
@@ -52,18 +58,17 @@ abstract class FutureProxy extends Future {
     return $this->getProxiedFuture()->getWriteSockets();
   }
 
-  protected function getResult() {
-    if ($this->result === null) {
-      $result = $this->getProxiedFuture()->resolve();
-      $result = $this->didReceiveResult($result);
-      $this->result = $result;
-    }
-    return $this->result;
-  }
-
   public function start() {
     $this->getProxiedFuture()->start();
     return $this;
+  }
+
+  protected function getServiceProfilerStartParameters() {
+    return $this->getProxiedFuture()->getServiceProfilerStartParameters();
+  }
+
+  protected function getServiceProfilerResultParameters() {
+    return $this->getProxiedFuture()->getServiceProfilerResultParameters();
   }
 
   abstract protected function didReceiveResult($result);

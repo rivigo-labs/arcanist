@@ -123,13 +123,6 @@ final class HTTPFuture extends BaseHTTPFuture {
       if (!$this->socket) {
         return $this->stateReady;
       }
-
-      $profiler = PhutilServiceProfiler::getInstance();
-      $this->profilerCallID = $profiler->beginServiceCall(
-        array(
-          'type' => 'http',
-          'uri' => $this->getURI(),
-        ));
     }
 
     if (!$this->stateConnected) {
@@ -180,8 +173,9 @@ final class HTTPFuture extends BaseHTTPFuture {
 
     if (!$socket) {
       $this->stateReady = true;
-      $this->result = $this->buildErrorResult(
-        HTTPFutureTransportResponseStatus::ERROR_CONNECTION_FAILED);
+      $this->setResult(
+        $this->buildErrorResult(
+          HTTPFutureTransportResponseStatus::ERROR_CONNECTION_FAILED));
       return null;
     }
 
@@ -209,20 +203,20 @@ final class HTTPFuture extends BaseHTTPFuture {
     $this->stateReady = true;
 
     if ($timeout) {
-      $this->result = $this->buildErrorResult(
-        HTTPFutureTransportResponseStatus::ERROR_TIMEOUT);
+      $this->setResult(
+        $this->buildErrorResult(
+          HTTPFutureTransportResponseStatus::ERROR_TIMEOUT));
     } else if (!$this->stateConnected) {
-      $this->result = $this->buildErrorResult(
-        HTTPFutureTransportResponseStatus::ERROR_CONNECTION_REFUSED);
+      $this->setResult(
+        $this->buildErrorResult(
+          HTTPFutureTransportResponseStatus::ERROR_CONNECTION_REFUSED));
     } else if (!$this->stateWriteComplete) {
-      $this->result = $this->buildErrorResult(
-        HTTPFutureTransportResponseStatus::ERROR_CONNECTION_FAILED);
+      $this->setResult(
+        $this->buildErrorResult(
+          HTTPFutureTransportResponseStatus::ERROR_CONNECTION_FAILED));
     } else {
-      $this->result = $this->parseRawHTTPResponse($this->response);
+      $this->setResult($this->parseRawHTTPResponse($this->response));
     }
-
-    $profiler = PhutilServiceProfiler::getInstance();
-    $profiler->endServiceCall($this->profilerCallID, array());
 
     return true;
   }
@@ -297,6 +291,13 @@ final class HTTPFuture extends BaseHTTPFuture {
       implode('', $headers).
       "\r\n".
       $data;
+  }
+
+  protected function getServiceProfilerStartParameters() {
+    return array(
+      'type' => 'http',
+      'uri' => phutil_string_cast($this->getURI()),
+    );
   }
 
 }
