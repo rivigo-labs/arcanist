@@ -85,7 +85,7 @@ final class ArcanistSettings extends Phobject {
         'legacy' => 'immutable_history',
         'help' => pht(
           'If true, %s will never change repository history (e.g., through '.
-          'amending or rebasing). Defaults to true in Mercurial and false in '.
+          'amending or rebasing). Defaults to true in Mercurial and '.
           'Git. This setting has no effect in Subversion.',
           'arc'),
         'example' => 'false',
