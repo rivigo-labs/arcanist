@@ -1146,7 +1146,7 @@ final class ArcanistGitAPI extends ArcanistRepositoryAPI {
   }
 
   public function isHistoryDefaultImmutable() {
-    return false;
+    return true;
   }
 
   public function supportsAmend() {
