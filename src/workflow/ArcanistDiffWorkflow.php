@@ -1971,11 +1971,12 @@ EOTEXT
 
     $repository_api = $this->getRepositoryAPI();
     $local = $repository_api->getLocalCommitInformation();
+    // This is already a create workflow. if local Title, summary and revisions are present, don't use those for create
     if ($local) {
       $result = $this->parseCommitMessagesIntoFields($local);
-      if ($this->getArgument('create')) {
-        unset($result[0]['revisionID']);
-      }
+      unset($result[0]['title']);
+      unset($result[0]['summary']);
+      unset($result[0]['revisionID']);
     }
 
     $result[0] = $this->dispatchWillBuildEvent($result[0]);
