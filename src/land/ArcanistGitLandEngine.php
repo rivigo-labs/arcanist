@@ -357,11 +357,23 @@ final class ArcanistGitLandEngine
         pht('PUSHING'),
         pht('Pushing changes to "%s".', $this->getTargetFullRef()));
 
-      $err = $api->execPassthru(
-        'push -- %s %s:%s',
-        $this->getTargetRemote(),
-        $this->mergedRef,
-        $this->getTargetOnto());
+      if($this->getNoVerifyArgument()) {
+        $this->writeInfo(
+          pht('SKIPPING CHECKS'),
+          pht('Skipping pre push checks as --no-verify option provided'));
+
+        $err = $api->execPassthru(
+          'push --no-verify -- %s %s:%s',
+          $this->getTargetRemote(),
+          $this->mergedRef,
+          $this->getTargetOnto());
+      } else {
+        $err = $api->execPassthru(
+          'push -- %s %s:%s',
+          $this->getTargetRemote(),
+          $this->mergedRef,
+          $this->getTargetOnto());
+      }
 
       if ($err) {
         throw new ArcanistUsageException(
