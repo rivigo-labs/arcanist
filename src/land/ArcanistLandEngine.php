@@ -15,6 +15,7 @@ abstract class ArcanistLandEngine extends Phobject {
   private $shouldPreview;
   private $remoteArgument;
   private $ontoArgument;
+  private $noVerifyArgument;
 
   // TODO: This is really grotesque.
   private $buildMessageCallback;
@@ -135,6 +136,15 @@ abstract class ArcanistLandEngine extends Phobject {
 
   final public function getOntoArgument() {
     return $this->ontoArgument;
+  }
+
+  final public function setNoVerifyArgument($no_verify_argument) {
+    $this->noVerifyArgument = $no_verify_argument;
+    return $this;
+  }
+
+  final public function getNoVerifyArgument() {
+    return $this->noVerifyArgument;
   }
 
   abstract public function parseArguments();

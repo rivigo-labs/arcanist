@@ -1971,13 +1971,30 @@ EOTEXT
 
     $repository_api = $this->getRepositoryAPI();
     $local = $repository_api->getLocalCommitInformation();
-    // This is already a create workflow. if local Title, summary and revisions are present, don't use those for create
+    // This is already a create workflow.
+    // if local summary and revisions are present, don't use these for create
     if ($local) {
       $result = $this->parseCommitMessagesIntoFields($local);
-      unset($result[0]['title']);
       unset($result[0]['summary']);
       unset($result[0]['revisionID']);
     }
+
+    $current_set_title = (string) idx($result[0],'title','');
+    if ($current_set_title === '')
+      $current_set_title = '<Title>';
+    $current_brach = $repository_api->getBranchName();
+    $target_remote_branch = join(",", (array) $this->getArgument('paths'));
+    $target_remote_branch = str_replace('origin/','',$target_remote_branch);
+    $repository_name = $this->getRepositoryName();
+
+    $desired_title_prefix = $current_brach.' --> '
+      .$target_remote_branch
+      .' ['.$repository_name.']';
+
+    if (!strpos($current_set_title, $desired_title_prefix))
+      $current_set_title = $desired_title_prefix.' : '.$current_set_title;
+
+    $result[0]['title'] = $current_set_title;
 
     $result[0] = $this->dispatchWillBuildEvent($result[0]);
 

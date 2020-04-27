@@ -13,6 +13,7 @@ final class ArcanistLandWorkflow extends ArcanistWorkflow {
   private $oldBranch;
   private $branch;
   private $onto;
+  private $noVerifyLand;
   private $ontoRemoteBranch;
   private $remote;
   private $useSquash;
@@ -162,6 +163,13 @@ EOTEXT
           'Keep the feature branch after pushing changes to the '.
           'remote (by default, it is deleted).'),
       ),
+      'no-verify' => array(
+        'help' => pht(
+          'Skip running pre push checks while landing'),
+        'supports' => array(
+          'git',
+        ),
+      ),
       'remote' => array(
         'param' => 'origin',
         'help' => pht(
@@ -242,6 +250,7 @@ EOTEXT
         ->setShouldKeep($this->keepBranch)
         ->setShouldSquash($this->useSquash)
         ->setShouldPreview($this->preview)
+        ->setNoVerifyArgument($this->noVerifyLand)
         ->setRemoteArgument($remote_arg)
         ->setOntoArgument($onto_arg)
         ->setBuildMessageCallback(array($this, 'buildEngineMessage'));
@@ -392,6 +401,8 @@ EOTEXT
     $this->keepBranch = $this->getArgument('keep-branch');
 
     $this->preview = $this->getArgument('preview');
+
+    $this->noVerifyLand = $this->getArgument('no-verify');
 
     if (!$this->branchType) {
       $this->branchType = $this->getBranchType($this->branch);
