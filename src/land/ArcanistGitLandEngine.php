@@ -289,11 +289,22 @@ final class ArcanistGitLandEngine
           $this->getTargetFullRef()));
     }
 
-    $api->execxLocal(
-      'commit --author %s --date %s -F %s --',
-      $original_author,
-      $original_date,
-      $this->getCommitMessageFile());
+    if($this->getNoVerifyArgument()) {
+      $this->writeInfo(
+        pht('SKIPPING CHECKS'),
+        pht('Skipping pre commit checks as --no-verify option provided'));
+      $api->execxLocal(
+        'commit --no-verify --author %s --date %s -F %s --',
+        $original_author,
+        $original_date,
+        $this->getCommitMessageFile());
+    } else {
+      $api->execxLocal(
+        'commit --author %s --date %s -F %s --',
+        $original_author,
+        $original_date,
+        $this->getCommitMessageFile());
+    }
 
     $this->getWorkflow()->didCommitMerge();
 
